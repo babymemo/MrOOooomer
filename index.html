@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>3D RPG - Sesli ve Fotoğraflı Orclar</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; user-select: none; }
+        
+        #instructions {
+            position: absolute; top: 50%; width: 100%;
+            text-align: center; color: white; font-family: sans-serif;
+            font-size: 24px; pointer-events: none;
+            text-shadow: 2px 2px 4px #000; transition: opacity 0.5s; z-index: 10;
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%;
+            width: 20px; height: 20px; border: 2px solid rgba(255, 255, 255, 0.8);
+            border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; z-index: 5;
+        }
+        #dot {
+            position: absolute; top: 50%; left: 50%; width: 4px; height: 4px; 
+            background: red; transform: translate(-50%, -50%); border-radius: 50%;
+        }
+        #hud {
+            position: absolute; bottom: 20px; left: 20px;
+            font-family: 'Arial Black', sans-serif; color: white;
+            font-size: 30px; text-shadow: 2px 2px 0 #000; pointer-events: none; z-index: 5;
+        }
+        #hp-bar-bg { width: 300px; height: 30px; background: #333; border: 2px solid white; margin-top: 5px; }
+        #hp-bar-fill { width: 100%; height: 100%; background: #e74c3c; transition: width 0.2s; }
+        
+        #game-over {
+            display: none; position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%; background: rgba(100, 0, 0, 0.8);
+            color: white; justify-content: center; align-items: center;
+            flex-direction: column; font-size: 50px; font-family: fantasy; z-index: 20;
+        }
+        button { padding: 15px 30px; font-size: 20px; cursor: pointer; font-weight: bold; margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <div id="crosshair"><div id="dot"></div></div>
+    
+    <div id="instructions">
+        Başlamak için TIKLA <br>
+        <span style="font-size: 16px;">W-A-S-D: Yürü | SPACE: Zıpla | SOL TIK: Ateş</span>
+    </div>
+
+    <div id="hud">
+        CAN: <span id="hp-text">100</span>
+        <div id="hp-bar-bg"><div id="hp-bar-fill"></div></div>
+    </div>
+
+    <div id="game-over">
+        <div>ÖLDÜN!</div>
+        <button onclick="location.reload()">Tekrar Dene</button>
+    </div>
+
+    <script type="importmap">
+        { "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }}
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+
+        let camera, scene, renderer, controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false, canJump = false;
+        
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+        const gravity = 35.0; 
+        const playerHeight = 1.6;
+
+        // OYUN AYARLARI
+        const PLAYER_MAX_HP = 100;
+        let playerHP = PLAYER_MAX_HP;
+        const ROCKET_DAMAGE = 200; 
+        const ORC_HP = 20;
+        const ORC_DAMAGE = 10;
+        const ORC_SPEED = 3.8;
+        
+        let orcs = []; 
+        let projectiles = [];
+        let explosions = [];
+        let lastShotTime = 0;
+        let isGameOver = false;
+
+        const clock = new THREE.Clock();
+
+        // --- SES VE RESİM YÜKLEME ---
+        const textureLoader = new THREE.TextureLoader();
+        const faceTexture = textureLoader.load('orc_surat.jpg');
+        faceTexture.colorSpace = THREE.SRGBColorSpace; 
+
+        // SES DOSYASI BURADA TANIMLANIYOR
+        const hitSound = new Audio('orc_vurma.mp3');
+        // Sesin çok hızlı tekrar edebilmesi için ön yükleme yapmaya çalışalım
+        hitSound.preload = 'auto';
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB);
+            scene.fog = new THREE.Fog(0x87CEEB, 10, 80);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.y = playerHeight;
+
+            controls = new PointerLockControls(camera, document.body);
+            const instructions = document.getElementById('instructions');
+            
+            document.body.addEventListener('click', () => { if(!isGameOver) controls.lock(); });
+            controls.addEventListener('lock', () => instructions.style.opacity = 0);
+            controls.addEventListener('unlock', () => { if(!isGameOver) instructions.style.opacity = 1 });
+            scene.add(controls.getObject());
+
+            // Klavye Kontrolleri
+            const onKeyDown = (e) => {
+                switch (e.code) {
+                    case 'KeyW': moveForward = true; break;
+                    case 'KeyA': moveLeft = true; break;
+                    case 'KeyS': moveBackward = true; break;
+                    case 'KeyD': moveRight = true; break;
+                    case 'Space': if (canJump) velocity.y += 15.0; canJump = false; break;
+                }
+            };
+            const onKeyUp = (e) => {
+                switch (e.code) {
+                    case 'KeyW': moveForward = false; break;
+                    case 'KeyA': moveLeft = false; break;
+                    case 'KeyS': moveBackward = false; break;
+                    case 'KeyD': moveRight = false; break;
+                }
+            };
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            
+            document.addEventListener('mousedown', (e) => {
+                if (controls.isLocked && e.button === 0 && !isGameOver) shootRPG();
+            });
+
+            createEnvironment();
+            createRPGModel();
+            
+            for(let i=0; i<15; i++) spawnOrc();
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true; 
+            document.body.appendChild(renderer.domElement);
+            
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function createEnvironment() {
+            const floorGeo = new THREE.PlaneGeometry(200, 200); 
+            floorGeo.rotateX(-Math.PI / 2);
+            const floorMat = new THREE.MeshStandardMaterial({ color: 0x228B22 });
+            const floor = new THREE.Mesh(floorGeo, floorMat);
+            floor.receiveShadow = true;
+            scene.add(floor);
+
+            // Çimenler
+            const grassGeo = new THREE.ConeGeometry(0.1, 0.4, 4); grassGeo.translate(0, 0.2, 0);
+            const grassMat = new THREE.MeshBasicMaterial({ color: 0x32CD32 });
+            const grassField = new THREE.InstancedMesh(grassGeo, grassMat, 3000);
+            const dummy = new THREE.Object3D();
+            for(let i=0; i<3000; i++){
+                 dummy.position.set((Math.random()-0.5)*180, 0, (Math.random()-0.5)*180);
+                 dummy.rotation.y = Math.random()*Math.PI;
+                 dummy.updateMatrix(); grassField.setMatrixAt(i, dummy.matrix);
+            }
+            scene.add(grassField);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+            dirLight.position.set(50, 100, 50);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+        }
+
+        function createRPGModel() {
+            const rpgGroup = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 1.2, 8), new THREE.MeshStandardMaterial({ color: 0x2F4F4F }));
+            body.rotation.x = Math.PI/2;
+            const warhead = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.25, 8), new THREE.MeshStandardMaterial({ color: 0x8B0000 }));
+            warhead.rotation.x = Math.PI/2; warhead.position.z = -0.7;
+            rpgGroup.add(body, warhead);
+            rpgGroup.position.set(0.3, -0.25, -0.5);
+            camera.add(rpgGroup);
+        }
+
+        function spawnOrc() {
+            const orcData = {
+                hp: ORC_HP,
+                mesh: new THREE.Group(),
+                lastAttack: 0,
+                speed: ORC_SPEED + (Math.random() - 0.5),
+                parts: {}
+            };
+
+            const skinMat = new THREE.MeshStandardMaterial({ color: 0x006400 }); 
+            
+            const body = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.9, 0.4), skinMat);
+            body.position.y = 1.1; 
+            body.castShadow = true;
+            orcData.mesh.add(body);
+
+            // KAFA
+            const headGroup = new THREE.Group();
+            headGroup.position.y = 1.8;
+            
+            const faceMat = new THREE.MeshStandardMaterial({ map: faceTexture });
+
+            const headMaterials = [
+                skinMat, 
+                skinMat, 
+                skinMat, 
+                skinMat, 
+                faceMat, // ÖN YÜZ (Resim)
+                skinMat 
+            ];
+
+            const headCube = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), headMaterials);
+            headGroup.add(headCube);
+            orcData.mesh.add(headGroup);
+
+            // KOLLAR
+            const armGeo = new THREE.BoxGeometry(0.15, 0.7, 0.15);
+            const rightArmGroup = new THREE.Group();
+            rightArmGroup.position.set(0.4, 1.4, 0);
+            const rightArm = new THREE.Mesh(armGeo, skinMat);
+            rightArm.position.y = -0.25; 
+            rightArmGroup.add(rightArm);
+            orcData.mesh.add(rightArmGroup);
+            orcData.parts.rightArm = rightArmGroup;
+
+            const leftArmGroup = new THREE.Group();
+            leftArmGroup.position.set(-0.4, 1.4, 0);
+            const leftArm = new THREE.Mesh(armGeo, skinMat);
+            leftArm.position.y = -0.25;
+            leftArmGroup.add(leftArm);
+            orcData.mesh.add(leftArmGroup);
+            orcData.parts.leftArm = leftArmGroup;
+
+            // SOPA
+            const clubGroup = new THREE.Group();
+            const clubHandle = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.8), new THREE.MeshStandardMaterial({color: 0x8B4513}));
+            clubHandle.rotation.x = Math.PI/2; clubHandle.position.set(0, -0.6, 0.3);
+            const clubHead = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.5), new THREE.MeshStandardMaterial({color: 0x555555}));
+            clubHead.rotation.x = Math.PI/2; clubHead.position.set(0, -0.6, 0.8);
+            clubGroup.add(clubHandle, clubHead);
+            rightArmGroup.add(clubGroup);
+
+            let x, z;
+            do {
+                x = (Math.random() - 0.5) * 120; z = (Math.random() - 0.5) * 120;
+            } while (Math.sqrt(x*x + z*z) < 20); 
+            orcData.mesh.position.set(x, 0, z);
+            scene.add(orcData.mesh);
+            orcs.push(orcData);
+        }
+
+        function shootRPG() {
+            const now = Date.now();
+            if (now - lastShotTime < 1000) return; 
+            lastShotTime = now;
+
+            const rocket = new THREE.Mesh(new THREE.SphereGeometry(0.15), new THREE.MeshBasicMaterial({ color: 0xFF4500 }));
+            rocket.position.copy(camera.position);
+            
+            const dir = new THREE.Vector3();
+            camera.getWorldDirection(dir);
+            rocket.position.add(dir.clone().multiplyScalar(1.0));
+            rocket.position.y -= 0.2;
+
+            rocket.userData = { velocity: dir.multiplyScalar(60) };
+            scene.add(rocket);
+            projectiles.push(rocket);
+        }
+
+        function animate() {
+            if(isGameOver) return;
+            requestAnimationFrame(animate);
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            if (controls.isLocked) {
+                velocity.x -= velocity.x * 10.0 * delta; velocity.z -= velocity.z * 10.0 * delta; velocity.y -= gravity * delta;
+                direction.z = Number(moveForward) - Number(moveBackward); direction.x = Number(moveRight) - Number(moveLeft); direction.normalize();
+                if (moveForward || moveBackward) velocity.z -= direction.z * 80.0 * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * 80.0 * delta;
+                controls.moveRight(-velocity.x * delta); controls.moveForward(-velocity.z * delta);
+                camera.position.y += velocity.y * delta;
+                if (camera.position.y < playerHeight) { velocity.y = 0; camera.position.y = playerHeight; canJump = true; }
+            }
+
+            const playerPos = camera.position;
+            orcs.forEach(orc => {
+                const dist = orc.mesh.position.distanceTo(playerPos);
+                orc.mesh.lookAt(playerPos.x, 0, playerPos.z); 
+                if (dist > 2.5) {
+                    orc.mesh.translateZ(orc.speed * delta);
+                    orc.parts.leftArm.rotation.x = Math.sin(time * 10) * 0.5;
+                    orc.parts.rightArm.rotation.x = -Math.sin(time * 10) * 0.5;
+                } else {
+                    if (Date.now() - orc.lastAttack > 1500) { 
+                        orc.lastAttack = Date.now(); 
+                        
+                        // --- SES ÇALMA KODU BURADA ---
+                        hitSound.currentTime = 0; // Sesi başa sar (peş peşe çalabilmesi için)
+                        hitSound.play().catch(e => console.log("Ses çalınamadı (Tarayıcı izni gerekebilir):", e));
+
+                        playerTakeDamage(ORC_DAMAGE);
+                    }
+                    const attackPhase = (Date.now() - orc.lastAttack) / 500;
+                    if(attackPhase < 1) orc.parts.rightArm.rotation.x = -Math.PI/2 + Math.sin(attackPhase * Math.PI) * 2;
+                    else orc.parts.rightArm.rotation.x = -0.5;
+                }
+            });
+
+            for(let i = projectiles.length - 1; i >= 0; i--) {
+                const rocket = projectiles[i];
+                const moveVec = rocket.userData.velocity.clone().multiplyScalar(delta);
+                let exploded = false;
+                
+                for(let j=0; j<orcs.length; j++) {
+                      if(rocket.position.distanceTo(orcs[j].mesh.position.clone().add(new THREE.Vector3(0,1.5,0))) < 1.5) {
+                          triggerExplosion(rocket.position); scene.remove(rocket); projectiles.splice(i, 1); exploded = true; break;
+                      }
+                }
+                if(exploded) continue;
+
+                rocket.position.add(moveVec);
+                if(rocket.position.y <= 0.2) {
+                    triggerExplosion(rocket.position); scene.remove(rocket); projectiles.splice(i, 1);
+                } else if (rocket.position.length() > 300) { scene.remove(rocket); projectiles.splice(i, 1); }
+            }
+
+            for(let i = explosions.length - 1; i >= 0; i--) {
+                const exp = explosions[i];
+                exp.life += delta;
+                const scale = 1 + (exp.life / exp.maxLife) * 8;
+                exp.mesh.scale.setScalar(scale);
+                exp.mesh.material.opacity = 1 - (exp.life / exp.maxLife);
+                if(exp.life >= exp.maxLife) { scene.remove(exp.mesh); explosions.splice(i, 1); }
+            }
+            renderer.render(scene, camera);
+        }
+
+        function playerTakeDamage(amount) {
+            playerHP -= amount;
+            document.getElementById('hp-bar-fill').style.width = Math.max(0, (playerHP / PLAYER_MAX_HP) * 100) + '%';
+            document.getElementById('hp-text').innerText = playerHP;
+            document.body.style.backgroundColor = '#300'; setTimeout(() => document.body.style.backgroundColor = '#000', 100);
+            if(playerHP <= 0) { isGameOver = true; controls.unlock(); document.getElementById('game-over').style.display = 'flex'; }
+        }
+
+        function triggerExplosion(pos) {
+            const exMesh = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 16), new THREE.MeshBasicMaterial({ color: 0xFFD700, transparent: true, opacity: 0.8 }));
+            exMesh.position.copy(pos); scene.add(exMesh);
+            explosions.push({ mesh: exMesh, life: 0, maxLife: 0.4 });
+            for(let i = orcs.length - 1; i >= 0; i--) {
+                if(orcs[i].mesh.position.distanceTo(pos) < 6.0) {
+                    orcs[i].hp -= ROCKET_DAMAGE; if(orcs[i].hp <= 0) { scene.remove(orcs[i].mesh); orcs.splice(i, 1);
+                    if(orcs.length === 0) setTimeout(() => { for(let k=0; k<5; k++) spawnOrc(); }, 2000); }
+                }
+            }
+        }
+    </script>
+</body>
+</html>
